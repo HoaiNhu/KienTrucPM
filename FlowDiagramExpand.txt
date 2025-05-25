@@ -1,0 +1,121 @@
+graph TD
+    subgraph Producer[P1/P2]
+        P1[Producer 1<br>Port: 12348] -->|Tạo Message<br>Order123, Seq: 1-3<br>Transaction ID, Token| P1Send[Send Message<br>SSL Socket<br>Load Balancer]
+        P2[Producer 2<br>Port: 12349] -->|Tạo Message<br>Order456, Seq: 1-2<br>Transaction ID, Token| P2Send[Send Message<br>SSL Socket<br>Load Balancer]
+        P1Confirm[Confirm Server<br>Listen: 12348<br>SSL] -->|Nhận Confirm| P1Receive[In Confirm<br>Seq, Content]
+        P2Confirm[Confirm Server<br>Listen: 12349<br>SSL] -->|Nhận Confirm| P2Receive[In Confirm<br>Seq, Content]
+    end
+
+    subgraph LoadBalancer[Load Balancer]
+        LB[Load Balancer<br>Port: 12345] -->|Phân phối| BReceive1
+        LB -->|Phân phối| BReceive2
+    end
+
+    subgraph Broker1[Broker 1<br>Node 1]
+        BReceive1[Receive Message<br>Port: 12345<br>SSL] -->|Xác thực Token| BAuth1[Authenticate<br>Producer]
+        BAuth1 -->|P1: Partition 1<br>P2: Partition 0| BAssign1[Assign Partition<br>theo producer]
+        BAssign1 -->|Lưu Message| BQueue1[PriorityQueue<br>partitions 0-1-n]
+        BAssign1 -->|Lưu SQLite| BDB1[SQLite<br>messages.db<br>giới hạn 1000 dòng]
+        BAssign1 -->|Đồng bộ| BSync1[Sync Partitions<br>Socket 12350]
+        BQueue1 -->|Tăng Load| BLoad1[partition_load]
+        BQueue1 -->|Ghi Log| BLog1[Log File<br>broker.log]
+        BLoad1 -->|Load > 80% max_load?| BCheckMax1{Check max_partitions?<br>RAM 100MB mỗi partition<br>CPU 2 core}
+        BCheckMax1 -->|Dưới giới hạn| BAdd1[Add Partition<br>Port 12346 + pid]
+        BCheckMax1 -->|Vượt giới hạn| BReassign1[Reassign sang<br>partition ít tải nhất]
+        BAdd1 --> BSendConsumer1[Send to Consumer<br>Port 12346 + pid<br>SSL, Retry 3 lần]
+        BReassign1 --> BSendConsumer1
+        BSendConsumer1 -->|Kiểm tra Socket| BSocketCheck1[Check Socket bằng select]
+        BSocketCheck1 -->|Partition 0| C0
+        BSocketCheck1 -->|Partition 1| C1
+        BSocketCheck1 -->|Partition khác| CX
+        BReceiveConfirm1[Receive Confirm<br>Temp & Final<br>From Consumer] -->|Giảm Load| BLoad1
+        BReceiveConfirm1 -->|Xóa Message| BQueue1
+        BReceiveConfirm1 -->|Gửi Confirm<br>Retry 5 lần| P1Confirm
+        BReceiveConfirm1 -->|Gửi Confirm<br>Retry 5 lần| P2Confirm
+        BLoad1 -->|Queue rỗng và<br>không có Consumer?| BRemove1{Remove Idle Partition?<br>pid > 1, Kiểm tra mỗi 60s}
+        BRemove1 -->|Có| BDelete1[Delete Partition<br>Giải phóng Port, Async]
+        BSendConsumer1 -->|Consumer lỗi?| BReassign1
+        BSocket1[Cleanup Sockets định kỳ] --> BSocketCheck1
+        BAsync1[Asyncio Loop<br>ưu tiên Confirm] --> BSendConsumer1
+        BAsync1 --> BReceive1
+        BAsync1 --> BReceiveConfirm1
+        BMonitor1[HTTP Endpoint<br>/status] -->|Truy vấn| BLoad1
+        BMonitor1 -->|Truy vấn| BSocket1
+        BMonitor1 -->|Truy vấn| BQueue1
+    end
+
+    subgraph Broker2[Broker 2<br>Node 2]
+        BReceive2[Receive Message<br>Port: 12345<br>SSL] -->|Xác thực Token| BAuth2[Authenticate<br>Producer]
+        BAuth2 -->|Đồng bộ| BSync2[Sync Partitions<br>Socket 12350]
+        BSync2 --> BAssign2[Assign Partition]
+        BAssign2 --> BQueue2[PriorityQueue]
+        BAssign2 --> BDB2[SQLite]
+        BQueue2 --> BLoad2[partition_load]
+        BQueue2 --> BLog2[Log File]
+        BLoad2 --> BCheckMax2{Check max_partitions?}
+        BCheckMax2 --> BAdd2[Add Partition]
+        BCheckMax2 --> BReassign2[Reassign]
+        BAdd2 --> BSendConsumer2[Send to Consumer]
+        BReassign2 --> BSendConsumer2
+        BSendConsumer2 --> BSocketCheck2[Check Socket]
+        BSocketCheck2 --> C0
+        BSocketCheck2 --> C1
+        BSocketCheck2 --> CX
+        BReceiveConfirm2[Receive Confirm] --> BLoad2
+        BReceiveConfirm2 --> BQueue2
+        BReceiveConfirm2 --> P1Confirm
+        BReceiveConfirm2 --> P2Confirm
+        BLoad2 --> BRemove2{Remove Idle?}
+        BRemove2 --> BDelete2[Delete Partition]
+        BSendConsumer2 --> BReassign2
+        BSocket2[Cleanup Sockets] --> BSocketCheck2
+        BAsync2[Asyncio Loop] --> BSendConsumer2
+        BAsync2 --> BReceive2
+        BAsync2 --> BReceiveConfirm2
+        BMonitor2[HTTP Endpoint] --> BLoad2
+        BMonitor2 --> BSocket2
+        BMonitor2 --> BQueue2
+    end
+
+    subgraph Consumer[C0/C1/CX]
+        C0[Consumer 0<br>Connect 12346<br>SSL, Token] -->|Nhận Message| C0Check[Check Transaction ID<br>processed_ids]
+        C1[Consumer 1<br>Connect 12347<br>SSL, Token] -->|Nhận Message| C1Check[Check Transaction ID<br>processed_ids]
+        CX[Consumer X<br>Connect 12346 + pid<br>SSL, Token] -->|Nhận Message| CXCheck[Check Transaction ID<br>processed_ids]
+        C0Check -->|Không lặp| C0TempConfirm[Send Temp Confirm]
+        C1Check -->|Không lặp| C1TempConfirm[Send Temp Confirm]
+        CXCheck -->|Không lặp| CXTempConfirm[Send Temp Confirm]
+        C0TempConfirm --> C0Process[Process Message<br>Theo Content, Seq, Time]
+        C1TempConfirm --> C1Process[Process Message<br>Theo Content, Seq, Time]
+        CXTempConfirm --> CXProcess[Process Message<br>Theo Content, Seq, Time]
+        C0Process -->|Tạo Final Confirm<br>C0| C0SendConfirm[Send Final Confirm<br>Socket 12346]
+        C1Process -->|Tạo Final Confirm<br>C1| C1SendConfirm[Send Final Confirm<br>Socket 12347]
+        CXProcess -->|Tạo Final Confirm<br>CX| CXSendConfirm[Send Final Confirm<br>Socket 12346 + pid]
+        C0 -->|Lỗi kết nối<br>Retry 3 lần| BSendConsumer1
+        C0 -->|Lỗi kết nối<br>Retry 3 lần| BSendConsumer2
+        C1 -->|Lỗi kết nối<br>Retry 3 lần| BSendConsumer1
+        C1 -->|Lỗi kết nối<br>Retry 3 lần| BSendConsumer2
+        CX -->|Lỗi kết nối<br>Retry 3 lần| BSendConsumer1
+        CX -->|Lỗi kết nối<br>Retry 3 lần| BSendConsumer2
+    end
+
+    P1Send -->|SSL| LB
+    P2Send -->|SSL| LB
+    BSync1 -->|Socket| BSync2
+    BSync2 -->|Socket| BSync1
+    C0SendConfirm -->|SSL| BReceiveConfirm1
+    C0SendConfirm -->|SSL| BReceiveConfirm2
+    C1SendConfirm -->|SSL| BReceiveConfirm1
+    C1SendConfirm -->|SSL| BReceiveConfirm2
+    CXSendConfirm -->|SSL| BReceiveConfirm1
+    CXSendConfirm -->|SSL| BReceiveConfirm2
+
+    classDef producer fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef loadbalancer fill:#ffb,stroke:#333,stroke-width:2px;
+    classDef broker fill:#bbf,stroke:#333,stroke-width:2px;
+    classDef consumer fill:#bfb,stroke:#333,stroke-width:2px;
+    class P1,P2,P1Send,P2Send,P1Confirm,P2Confirm,P1Receive,P2Receive producer;
+    class LB loadbalancer;
+    class BReceive1,BAuth1,BAssign1,BQueue1,BLoad1,BLog1,BDB1,BSync1,BSendConsumer1,BReceiveConfirm1,BCheckMax1,BAdd1,BReassign1,BRemove1,BDelete1,BSocket1,BSocketCheck1,BAsync1,BMonitor1 broker;
+    class BReceive2,BAuth2,BAssign2,BQueue2,BLoad2,BLog2,BDB2,BSync2,BSendConsumer2,BReceiveConfirm2,BCheckMax2,BAdd2,BReassign2,BRemove2,BDelete2,BSocket2,BSocketCheck2,BAsync2,BMonitor2 broker;
+    class C0,C1,CX,C0Check,C1Check,CXCheck,C0TempConfirm,C1TempConfirm,CXTempConfirm,C0Process,C1Process,CXProcess,C0SendConfirm,C1SendConfirm,CXSendConfirm consumer;
+                                                                                                                          

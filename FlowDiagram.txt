@@ -1,0 +1,51 @@
+graph TD
+    subgraph Producer
+        P1["Producer 1<br>Port: 12348"] --> P1Send["Send Order123<br>Seq: 1-3"]
+        P2["Producer 2<br>Port: 12349"] --> P2Send["Send Order456<br>Seq: 1-2"]
+        P1Confirm["Confirm Server<br>12348"] --> P1Receive["Confirm<br>Seq, Content"]
+        P2Confirm["Confirm Server<br>12349"] --> P2Receive["Confirm<br>Seq, Content"]
+    end
+ 
+    subgraph Broker
+        P1Send --> BReceive["Receive<br>Port: 12345"]
+        P2Send --> BReceive
+        BReceive --> BAssign["Assign Partition"]
+        BAssign --> BQueue["Queue"]
+        BQueue --> BLoad["Load Monitor"]
+        BQueue --> BLog["Log"]
+        BLoad --> BNewPartition{"Load > 80%?"}
+        BNewPartition -->|Yes| BAdd["Add Partition"]
+        BNewPartition -->|No| BSendConsumer["Send to Consumer"]
+        BSendConsumer --> C0
+        BSendConsumer --> C1
+        BSendConsumer --> C0E
+        BSendConsumer --> BReassign{"Consumer lỗi?"}
+        BReassign -->|Yes| BNewPartition
+        BReceiveConfirm["Receive Confirm"] --> BLoad
+        BReceiveConfirm --> BQueue
+        BReceiveConfirm --> P1Confirm
+        BReceiveConfirm --> P2Confirm
+    end
+ 
+    subgraph Consumer
+        C0["Consumer 0"] --> C0Check["Check ID"]
+        C0Check --> C0Proc["Process + Log"]
+        C0Proc --> C0SendConfirm["Send Confirm"]
+        C1["Consumer 1"] --> C1Check["Check ID"]
+        C1Check --> C1Proc["Process + Log"]
+        C1Proc --> C1SendConfirm["Send Confirm"]
+        C0E["Consumer 0 Extra"] --> C0ECheck["Check ID"]
+        C0ECheck --> C0EProc["Process + Log"]
+        C0EProc --> C0ESendConfirm["Send Confirm"]
+    end
+ 
+    C0SendConfirm --> BReceiveConfirm
+    C0ESendConfirm --> BReceiveConfirm
+    C1SendConfirm --> BReceiveConfirm
+ 
+    classDef producer fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef broker fill:#bbf,stroke:#333,stroke-width:2px;
+    classDef consumer fill:#bfb,stroke:#333,stroke-width:2px;
+    class P1,P2,P1Send,P2Send,P1Confirm,P2Confirm,P1Receive,P2Receive producer;
+    class BReceive,BAssign,BQueue,BLoad,BLog,BNewPartition,BAdd,BSendConsumer,BReceiveConfirm,BReassign broker;
+    class C0,C0E,C1,C0Check,C1Check,C0Proc,C1Proc,C0ECheck,C0EProc,C0SendConfirm,C1SendConfirm,C0ESendConfirm consumer;                                                       
